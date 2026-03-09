@@ -4,6 +4,8 @@ from datetime import datetime
 import os
 
 SCHEMA="{{'scraped_quotes' if params.environment == 'production' else 'dev_joel'}}"
+QUOTES = "{{'quotes' if params.environment == 'production' else 'scraped_quotes__quotes'}}"
+AUTHORS = "{{'authors' if params.environment == 'production' else 'scraped_quotes__authors'}}"
 DAG_ROOT=pathlib.Path(__file__).parent
 BUCKET="{{ 'l3-external-storage-753900908173' if params.environment == 'production' else 'l3-external-storage-753900908173' }}"
 S3_KEYS={
@@ -189,31 +191,72 @@ def quotes_scraper():
         quotes(*args), authors(*args)
 
     @task_group
+    def redshift_init():
+        from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+        schema = SQLExecuteQueryOperator(
+            task_id='schema',
+            conn_id="redshift_default",
+            sql="CREATE SCHEMA IF NOT EXISTS " + SCHEMA
+            )
+
+        quotes= SQLExecuteQueryOperator(
+            task_id="quotes",
+            conn_id="redshift_default",
+            sql=f"""CREATE TABLE IF NOT EXISTS {SCHEMA}.{QUOTES} (
+                quote  VARCHAR(MAX),
+                author VARCHAR(255),
+                tags   SUPER
+                )""",
+            )
+
+        authors = SQLExecuteQueryOperator(
+            task_id="authors",
+            conn_id="redshift_default",
+            sql=f"""CREATE TABLE IF NOT EXISTS {SCHEMA}.{AUTHORS} (
+                author_name        VARCHAR(255),
+                author_birthdate   VARCHAR(255),
+                author_birthplace  VARCHAR(255),
+                author_description VARCHAR(MAX)
+                )""",
+            )
+
+        schema >> [quotes, authors]
+
+    @task_group
     def load():
 
          from airflow.providers.amazon.aws.transfers.s3_to_redshift import S3ToRedshiftOperator
 
          quotes = S3ToRedshiftOperator(
-             task_id="quotes",
-             table="{{'quotes' if params.environment == 'production' else 'scraped_quotes__quotes'}}",
-             schema=SCHEMA,
-             s3_bucket=BUCKET,
-             s3_key=S3_KEYS['transform'] + '/quotes.csv'
+            task_id="quotes",
+            table="{{'quotes' if params.environment == 'production' else 'scraped_quotes__quotes'}}",
+            schema=SCHEMA,
+            s3_bucket=BUCKET,
+            s3_key=S3_KEYS['transform'] + '/quotes.csv',
+            copy_options=[
+                "CSV",
+                "IGNOREHEADER 1",
+                ],
          )
 
          authors = S3ToRedshiftOperator(
-             task_id="authors",
-             table="{{'authors' if params.environment == 'production' else 'scraped_quotes__authors'}}",
-             schema=SCHEMA,
-             s3_bucket=BUCKET,
-             s3_key= + '/authors.csv',
-             method='UPSERT',
-             upsert_keys='author_name'
+            task_id="authors",
+            table="{{'authors' if params.environment == 'production' else 'scraped_quotes__authors'}}",
+            schema=SCHEMA,
+            s3_bucket=BUCKET,
+            s3_key= S3_KEYS['transform'] + '/authors.csv',
+            method='UPSERT',
+            upsert_keys=['author_name'],
+            copy_options=[
+                "CSV",
+                "IGNOREHEADER 1",
+                ],
             )
          
          quotes, authors
 
         
-    extract() >> transform() >> load()
+    extract() >> transform() >> redshift_init() >> load()
     
 quotes_scraper()
