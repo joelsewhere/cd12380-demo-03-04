@@ -1,10 +1,11 @@
 from airflow.sdk import dag, task, task_group, Param
 import pathlib
 from datetime import datetime
+import os
 
-SCHEMA="{{'scraped_quotes' if params.environment == 'development' else 'dev_joel'}}"
+SCHEMA="{{'scraped_quotes' if params.environment == 'production' else 'dev_joel'}}"
 DAG_ROOT=pathlib.Path(__file__).parent
-BUCKET="{{ 'l3-external-storage-753900908173' if params.environment == 'development' else 'l3-external-storage-753900908173-dev' }}"
+BUCKET="{{ 'l3-external-storage-753900908173' if params.environment == 'production' else 'l3-external-storage-753900908173' }}"
 S3_KEYS={
     'extract': '{{ dag.dag_id }}/extract/{{ ds }}',
     'transform': '{{ dag.dag_id }}/transform/unprocessed/{{ ds }}',
@@ -13,11 +14,15 @@ S3_KEYS={
 
 @dag(
     schedule='@daily',
-    start_date=datetime(2025, 3, 5),
-    end_date=datetime(2026, 3, 13),
+    start_date=datetime(2025, 3, 8),
+    end_date=datetime(2026, 3, 16),
     params={
-        'environment': Param('development', dtype='string', enum=['developmenr', 'environment'])
-    }
+        'environment': Param(
+            os.getenv('environment', 'production'),
+            dtype='string',
+            enum=['development', 'production']
+            )
+        }
     )
 def quotes_scraper():
 
@@ -87,14 +92,15 @@ def quotes_scraper():
         filepath = (DAG_ROOT / 'quotes' / 'quotes-{{ ds }}.html').as_posix()
 
         # Call the `quotes` task
-        author_links = quotes(filepath, S3_KEYS['extract'])
+        author_links = quotes(filepath, S3_KEYS['extract'], BUCKET)
 
         # Call the `authors` task
-        authors(author_links, S3_KEYS['extract'])
+        authors(author_links, S3_KEYS['extract'], BUCKET)
 
     @task_group
-    def transform(extract_key, transform_key):
+    def transform():
 
+        @task
         def quotes(extract_key, transform_key, BUCKET):
             from airflow.providers.amazon.aws.hooks.s3 import S3Hook
             from bs4 import BeautifulSoup
@@ -103,20 +109,23 @@ def quotes_scraper():
             hook = S3Hook()
             html = hook.read_key(
                 key=extract_key + '/quotes.html',
-                bucket_name=BUCKET,
+                bucket_name=BUCKET
                 )
-            soup = BeautifulSoup(html)
+            
+            soup = BeautifulSoup(html, features='lxml')
 
             quote_containers = soup.find_all('div', {'class': 'quote'})
+
             data = []
+
             for container in quote_containers:
 
-                quote = container.find('span', {"class": "text"}).text
-                author = container.find('small', {"class": "author"}).text
+                quote = container.find('span', {'class': 'text'}).text
+                author = container.find('small', {'class': 'author'}).text
                 tags = [
-                    tag.text for tag in
-                    container.find('div', {"class": "tags"}).find_all('tag')
-                    ]
+                    tag.text for tag in 
+                    container.find('div', {'class': 'tags'}).find_all('tag')
+                ]
                 data.append(
                     {
                         "quote": quote,
@@ -124,27 +133,29 @@ def quotes_scraper():
                         "tags": tags
                     }
                 )
-
-            csv = pd.DatFrame(data).to_csv(index=False)
             
+            csv = pd.DataFrame(data).to_csv(index=False)
+
             hook.load_string(
                 string_data=csv,
                 key=transform_key + '/quotes.csv',
                 bucket_name=BUCKET,
-                replace=True,
-                )
-            
+                replace=True
+            )
+
+        @task  
         def authors(extract_key, transform_key, BUCKET):
             from airflow.providers.amazon.aws.hooks.s3 import S3Hook
             from bs4 import BeautifulSoup
             import pandas as pd
 
             hook = S3Hook()
+
             author_keys = hook.list_keys(
                 prefix=extract_key + '/authors/',
-                bucket_name=BUCKET,
+                bucket_name=BUCKET
                 )
-            
+
             data = []
             for key in author_keys:
 
@@ -154,8 +165,9 @@ def quotes_scraper():
                     )
                 
                 soup = BeautifulSoup(html)
+
                 author_details = soup.find('div', {'class': 'author-details'})
-                
+
                 data.append(
                     {
                         'author_name': author_details.find('h3', {'class': 'author-title'}).text,
@@ -163,8 +175,8 @@ def quotes_scraper():
                         'author_birthplace': author_details.find('span', {'class': 'author-born-location'}).text,
                         'author_description': author_details.find('div', {'class': 'author-description'}).text
                         }
-                    )
-            
+                )
+
             csv = pd.DataFrame(data).to_csv(index=False)
             hook.load_string(
                 string_data=csv,
@@ -172,9 +184,9 @@ def quotes_scraper():
                 bucket_name=BUCKET,
                 replace=True,
                 )
-
-        quotes(extract_key, transform_key, BUCKET)
-        authors(extract_key, transform_key, BUCKET)
+        
+        args = [S3_KEYS['extract'], S3_KEYS['transform'], BUCKET]
+        quotes(*args), authors(*args)
 
     @task_group
     def load():
