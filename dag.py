@@ -107,6 +107,7 @@ def quotes_scraper():
             from airflow.providers.amazon.aws.hooks.s3 import S3Hook
             from bs4 import BeautifulSoup
             import pandas as pd
+            import json
 
             hook = S3Hook()
             html = hook.read_key(
@@ -126,13 +127,13 @@ def quotes_scraper():
                 author = container.find('small', {'class': 'author'}).text
                 tags = [
                     tag.text for tag in 
-                    container.find('div', {'class': 'tags'}).find_all('tag')
+                    container.find('div', {'class': 'tags'}).find_all('a', {'class': 'tag'})
                 ]
                 data.append(
                     {
                         "quote": quote,
                         "author": author,
-                        "tags": tags
+                        "tags": json.dumps(tags)
                     }
                 )
             
@@ -230,7 +231,7 @@ def quotes_scraper():
 
          quotes = S3ToRedshiftOperator(
             task_id="quotes",
-            table="{{'quotes' if params.environment == 'production' else 'scraped_quotes__quotes'}}",
+            table=QUOTES,
             schema=SCHEMA,
             s3_bucket=BUCKET,
             s3_key=S3_KEYS['transform'] + '/quotes.csv',
@@ -242,7 +243,7 @@ def quotes_scraper():
 
          authors = S3ToRedshiftOperator(
             task_id="authors",
-            table="{{'authors' if params.environment == 'production' else 'scraped_quotes__authors'}}",
+            table=AUTHORS,
             schema=SCHEMA,
             s3_bucket=BUCKET,
             s3_key= S3_KEYS['transform'] + '/authors.csv',
